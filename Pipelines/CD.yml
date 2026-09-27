@@ -1,0 +1,95 @@
+# Deploy to Azure Kubernetes Service
+# Build and push image to Azure Container Registry; Deploy to Azure Kubernetes Service
+# https://docs.microsoft.com/azure/devops/pipelines/languages/docker
+
+trigger: none
+pr: none
+
+resources:
+  pipelines:
+  - pipeline: ci
+    # Must match the CI pipeline name registered in Azure DevOps.
+    source: 'CatalogAPI-CI'
+    trigger:
+      branches:
+        include:
+        - refs/heads/master
+
+  repositories:
+  - repository: k8s
+    type: git
+    name: K8s
+    ref: refs/heads/master
+
+variables:
+
+  # Container registry service connection established during pipeline creation
+  dockerRegistryServiceConnection: '01771971-462b-48ac-9f00-54397ac35d72'
+  imageRepository: 'catalog-api'
+  containerRegistry: 'fiaptechchallenge.azurecr.io'
+  dockerfilePath: '**/Dockerfile'
+  tag: '$(Build.BuildId)'
+  imagePullSecret: 'fiaptechchallenge16278792-auth'
+
+  # Agent VM image name
+  vmImageName: 'ubuntu-latest'
+
+
+stages:
+- stage: Build
+  displayName: Build stage
+  jobs:
+  - job: Build
+    displayName: Build
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    # With CI and CD in the same repository, the completion trigger selects the CI commit.
+    - checkout: self
+
+    - task: Docker@2
+      displayName: Build and push an image to container registry
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: $(dockerfilePath)
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(tag)
+
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: Build
+
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy
+    pool:
+      vmImage: $(vmImageName)
+    environment: 'CatalogAPI-1845.fcg'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - checkout: k8s
+            path: s/K8s
+
+          - task: KubernetesManifest@0
+            displayName: Create imagePullSecret
+            inputs:
+              action: createSecret
+              secretName: $(imagePullSecret)
+              dockerRegistryEndpoint: $(dockerRegistryServiceConnection)
+
+          - task: KubernetesManifest@0
+            displayName: Deploy to Kubernetes cluster
+            inputs:
+              action: deploy
+              manifests: |
+                $(Pipeline.Workspace)/s/K8s/Kubernetes/catalog-api-deployment.yaml
+                $(Pipeline.Workspace)/s/K8s/Kubernetes/catalog-api-service.yaml
+              imagePullSecrets: |
+                $(imagePullSecret)
+              containers: |
+                $(containerRegistry)/$(imageRepository):$(tag)
+
